@@ -3,23 +3,31 @@ const SUPABASE_KEY = 'sb_publishable_M5R43WlF407aDZCnIe76Dg_t9qRVwmQ';
 
 let supabase = null;
 
+async function createSupabaseClient() {
+  try {
+    const module = await import('https://esm.sh/@supabase/supabase-js@2.57.4?bundle');
+    return module.createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    });
+  } catch (firstError) {
+    console.warn('Primärer Supabase-Loader fehlgeschlagen:', firstError);
+    const module = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/+esm');
+    return module.createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    });
+  }
+}
+
 async function startBurnLabBackend() {
   try {
-    const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2.57.4');
-    supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: true
-      }
-    });
-
+    supabase = await createSupabaseClient();
     renderCartCount();
     await loadProducts();
     await initAccount();
+    await initAdmin();
   } catch (error) {
     console.error('BurnLab Backend konnte nicht geladen werden:', error);
-    setGlobalError('Die Verbindung zum BurnLab-Backend konnte nicht hergestellt werden.');
+    setGlobalError(`Backend konnte nicht geladen werden: ${error?.message || 'Unbekannter Fehler'}`);
   }
 }
 
@@ -75,31 +83,24 @@ async function loadProducts() {
 
 async function initAccount() {
   if (!supabase) return;
-
   const status = document.querySelector('[data-account-status]');
   const form = document.querySelector('[data-auth-form]');
   const submit = document.querySelector('[data-auth-submit]');
   const logout = document.querySelector('[data-logout]');
   const register = document.querySelector('[data-register]');
-
   if (!form) return;
 
-  const setStatus = message => {
-    if (status) status.textContent = message;
-  };
-
+  const setStatus = message => { if (status) status.textContent = message; };
   const setBusy = busy => {
     if (!submit) return;
     submit.disabled = busy;
-    submit.textContent = busy
-      ? (form.dataset.mode === 'register' ? 'Registriere …' : 'Melde an …')
-      : (form.dataset.mode === 'register' ? 'Registrieren' : 'Einloggen');
+    submit.textContent = busy ? (form.dataset.mode === 'register' ? 'Registriere …' : 'Melde an …') : (form.dataset.mode === 'register' ? 'Registrieren' : 'Einloggen');
   };
 
   const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
   if (sessionError) {
     console.error('Session konnte nicht geladen werden:', sessionError);
-    setStatus('Sitzung konnte nicht geladen werden. Bitte erneut einloggen.');
+    setStatus(`Session-Fehler: ${sessionError.message}`);
   } else if (sessionData?.session?.user) {
     showLoggedIn(sessionData.session.user);
   }
@@ -111,57 +112,39 @@ async function initAccount() {
 
   form.addEventListener('submit', async event => {
     event.preventDefault();
-
     const email = form.email.value.trim().toLowerCase();
     const password = form.password.value;
     const mode = form.dataset.mode || 'login';
-
-    if (!email || !password) {
-      setStatus('Bitte E-Mail-Adresse und Passwort eingeben.');
-      return;
-    }
-
-    if (password.length < 6) {
-      setStatus('Das Passwort muss mindestens 6 Zeichen lang sein.');
-      return;
-    }
-
+    if (!email || !password) return setStatus('Bitte E-Mail-Adresse und Passwort eingeben.');
+    if (password.length < 6) return setStatus('Das Passwort muss mindestens 6 Zeichen lang sein.');
     setBusy(true);
     setStatus(mode === 'register' ? 'Konto wird erstellt …' : 'Anmeldung wird geprüft …');
-
     try {
-      let result;
-      if (mode === 'register') {
-        result = await supabase.auth.signUp({ email, password });
-      } else {
-        result = await supabase.auth.signInWithPassword({ email, password });
-      }
-
+      const result = mode === 'register'
+        ? await supabase.auth.signUp({ email, password, options: { emailRedirectTo: `${window.location.origin}/account.html` } })
+        : await supabase.auth.signInWithPassword({ email, password });
       if (result.error) {
         console.error('Supabase Auth Fehler:', result.error);
         setStatus(authErrorMessage(result.error));
         return;
       }
-
       if (mode === 'register') {
-        if (result.data.session) {
+        if (result.data.session && result.data.user) {
           setStatus('Konto erstellt und erfolgreich eingeloggt.');
           showLoggedIn(result.data.user);
         } else {
-          setStatus('Konto erstellt. Bitte bestätige zuerst deine E-Mail-Adresse und logge dich danach ein.');
+          setStatus('Konto erstellt. Falls E-Mail-Bestätigung aktiviert ist, bestätige die E-Mail und logge dich danach ein.');
         }
       } else if (result.data.session && result.data.user) {
         setStatus('Erfolgreich eingeloggt.');
         showLoggedIn(result.data.user);
       } else {
-        setStatus('Login abgeschlossen, aber keine Sitzung wurde erstellt. Bitte erneut versuchen.');
+        setStatus('Login abgeschlossen, aber keine Sitzung wurde erstellt.');
       }
     } catch (error) {
       console.error('Unerwarteter Auth-Fehler:', error);
-      setStatus('Login momentan nicht möglich. Bitte erneut versuchen.');
-    } finally {
-      setBusy(false);
-    }
+      setStatus(`Login/Registrierung fehlgeschlagen: ${error?.message || 'Unbekannter Fehler'}`);
+    } finally { setBusy(false); }
   });
 
   register?.addEventListener('click', () => {
@@ -174,41 +157,62 @@ async function initAccount() {
 
   logout?.addEventListener('click', async () => {
     const { error } = await supabase.auth.signOut();
-    if (error) {
-      console.error('Logout Fehler:', error);
-      setStatus(authErrorMessage(error));
-      return;
-    }
+    if (error) return setStatus(authErrorMessage(error));
     showLoggedOut();
   });
 
   function showLoggedIn(user) {
-    form.classList.add('hidden');
-    register?.classList.add('hidden');
-    logout?.classList.remove('hidden');
-    setStatus(`Eingeloggt als ${user.email}`);
-    loadOrders(user.id);
+    form.classList.add('hidden'); register?.classList.add('hidden'); logout?.classList.remove('hidden');
+    setStatus(`Eingeloggt als ${user.email}`); loadOrders(user.id);
   }
-
   function showLoggedOut() {
-    form.classList.remove('hidden');
-    register?.classList.remove('hidden');
-    logout?.classList.add('hidden');
-    setStatus('Bitte einloggen oder ein Konto erstellen.');
-    form.reset();
+    form.classList.remove('hidden'); register?.classList.remove('hidden'); logout?.classList.add('hidden');
+    setStatus('Bitte einloggen oder ein Konto erstellen.'); form.reset();
   }
-
   async function loadOrders(userId) {
     const list = document.querySelector('[data-orders]');
     if (!list) return;
     const { data, error } = await supabase.from('orders').select('id,status,total_cents,created_at').eq('user_id', userId).order('created_at', { ascending: false });
-    if (error) {
-      console.error('Bestellungen konnten nicht geladen werden:', error);
-      list.innerHTML = '<p>Bestellungen konnten nicht geladen werden.</p>';
-      return;
-    }
+    if (error) { list.innerHTML = '<p>Bestellungen konnten nicht geladen werden.</p>'; return; }
     list.innerHTML = data.length ? data.map(order => `<div class="card"><strong>Bestellung ${escapeHtml(order.id.slice(0, 8))}</strong><p>Status: ${escapeHtml(order.status)}</p><p>${(order.total_cents / 100).toFixed(2).replace('.', ',')} €</p></div>`).join('') : '<p>Noch keine Bestellungen.</p>';
   }
+}
+
+async function initAdmin() {
+  const form = document.querySelector('[data-admin-form]');
+  if (!form || !supabase) return;
+  const status = document.querySelector('[data-admin-status]');
+  const panel = document.querySelector('[data-admin-panel]');
+  const logout = document.querySelector('[data-admin-logout]');
+  const setStatus = message => { if (status) status.textContent = message; };
+
+  const checkAdmin = async user => {
+    if (!user) return false;
+    const { data, error } = await supabase.from('profiles').select('is_admin').eq('id', user.id).maybeSingle();
+    if (error) { console.error('Adminprüfung fehlgeschlagen:', error); setStatus(`Adminprüfung fehlgeschlagen: ${error.message}`); return false; }
+    if (!data?.is_admin) { setStatus('Dieser Account hat keinen Admin-Zugriff.'); return false; }
+    form.classList.add('hidden'); panel?.classList.remove('hidden'); logout?.classList.remove('hidden'); setStatus(`Admin-Zugriff aktiv für ${user.email}`); return true;
+  };
+
+  const { data } = await supabase.auth.getSession();
+  if (data.session?.user) await checkAdmin(data.session.user);
+
+  supabase.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_IN' && session?.user) await checkAdmin(session.user);
+    if (event === 'SIGNED_OUT') { form.classList.remove('hidden'); panel?.classList.add('hidden'); logout?.classList.add('hidden'); setStatus('Bitte als Admin einloggen.'); }
+  });
+
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const email = form.email.value.trim().toLowerCase();
+    const password = form.password.value;
+    setStatus('Admin-Login wird geprüft …');
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) { setStatus(authErrorMessage(error)); return; }
+    if (!(await checkAdmin(data.user))) { await supabase.auth.signOut(); }
+  });
+
+  logout?.addEventListener('click', async () => { await supabase.auth.signOut(); });
 }
 
 function authErrorMessage(error) {
@@ -223,8 +227,7 @@ function authErrorMessage(error) {
 }
 
 function setGlobalError(message) {
-  const status = document.querySelector('[data-account-status]');
-  if (status) status.textContent = message;
+  document.querySelectorAll('[data-account-status], [data-admin-status]').forEach(el => { el.textContent = message; });
 }
 
 function escapeHtml(value) {
