@@ -1,7 +1,19 @@
 const SUPABASE_URL = 'https://gzogytnwwmbmkbhrousj.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_M5R43WlF407aDZCnIe76Dg_t9qRVwmQ';
 
-const supabase = window.supabase?.createClient(SUPABASE_URL, SUPABASE_KEY);
+let supabase = null;
+
+async function startBurnLabBackend() {
+  try {
+    const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
+    supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+    renderCartCount();
+    await loadProducts();
+    await initAccount();
+  } catch (error) {
+    console.error('BurnLab Backend konnte nicht geladen werden:', error);
+  }
+}
 
 function getCart() {
   try { return JSON.parse(localStorage.getItem('burnlab_cart') || '[]'); }
@@ -39,7 +51,7 @@ async function loadProducts() {
       <h2>${escapeHtml(product.name_de)}</h2>
       <p>${escapeHtml(product.description_de || '')}</p>
       <strong>${(product.price_cents / 100).toFixed(2).replace('.', ',')} €</strong>
-      <p>Schärfe: ${'🌶️'.repeat(product.heat_level)} </p>
+      <p>Schärfe: ${'🌶️'.repeat(product.heat_level)}</p>
       <button data-add-product="${product.id}">In den Warenkorb</button>
     </article>`).join('');
   grid.querySelectorAll('[data-add-product]').forEach(button => {
@@ -56,7 +68,6 @@ async function initAccount() {
   const form = document.querySelector('[data-auth-form]');
   const logout = document.querySelector('[data-logout]');
   const register = document.querySelector('[data-register]');
-
   const { data: { session } } = await supabase.auth.getSession();
   if (session) showLoggedIn(session.user);
 
@@ -106,6 +117,5 @@ function escapeHtml(value) {
 
 document.addEventListener('DOMContentLoaded', () => {
   renderCartCount();
-  loadProducts();
-  initAccount();
+  startBurnLabBackend();
 });
