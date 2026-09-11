@@ -5,13 +5,21 @@ let supabase = null;
 
 async function startBurnLabBackend() {
   try {
-    const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
-    supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+    const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2.57.4');
+    supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
+      }
+    });
+
     renderCartCount();
     await loadProducts();
     await initAccount();
   } catch (error) {
     console.error('BurnLab Backend konnte nicht geladen werden:', error);
+    setGlobalError('Die Verbindung zum BurnLab-Backend konnte nicht hergestellt werden.');
   }
 }
 
@@ -42,7 +50,10 @@ function renderCartCount() {
 async function loadProducts() {
   if (!supabase) return;
   const { data, error } = await supabase.from('products').select('*').eq('active', true).order('created_at');
-  if (error) { console.error('Produkte konnten nicht geladen werden:', error); return; }
+  if (error) {
+    console.error('Produkte konnten nicht geladen werden:', error);
+    return;
+  }
   const grid = document.querySelector('[data-products]');
   if (!grid) return;
   grid.innerHTML = data.map(product => `
@@ -64,51 +75,156 @@ async function loadProducts() {
 
 async function initAccount() {
   if (!supabase) return;
+
   const status = document.querySelector('[data-account-status]');
   const form = document.querySelector('[data-auth-form]');
+  const submit = document.querySelector('[data-auth-submit]');
   const logout = document.querySelector('[data-logout]');
   const register = document.querySelector('[data-register]');
-  const { data: { session } } = await supabase.auth.getSession();
-  if (session) showLoggedIn(session.user);
 
-  form?.addEventListener('submit', async event => {
+  if (!form) return;
+
+  const setStatus = message => {
+    if (status) status.textContent = message;
+  };
+
+  const setBusy = busy => {
+    if (!submit) return;
+    submit.disabled = busy;
+    submit.textContent = busy
+      ? (form.dataset.mode === 'register' ? 'Registriere …' : 'Melde an …')
+      : (form.dataset.mode === 'register' ? 'Registrieren' : 'Einloggen');
+  };
+
+  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+  if (sessionError) {
+    console.error('Session konnte nicht geladen werden:', sessionError);
+    setStatus('Sitzung konnte nicht geladen werden. Bitte erneut einloggen.');
+  } else if (sessionData?.session?.user) {
+    showLoggedIn(sessionData.session.user);
+  }
+
+  supabase.auth.onAuthStateChange((event, session) => {
+    if (event === 'SIGNED_IN' && session?.user) showLoggedIn(session.user);
+    if (event === 'SIGNED_OUT') showLoggedOut();
+  });
+
+  form.addEventListener('submit', async event => {
     event.preventDefault();
-    const email = form.email.value.trim();
+
+    const email = form.email.value.trim().toLowerCase();
     const password = form.password.value;
     const mode = form.dataset.mode || 'login';
-    const result = mode === 'register'
-      ? await supabase.auth.signUp({ email, password })
-      : await supabase.auth.signInWithPassword({ email, password });
-    if (result.error) return setStatus(result.error.message);
-    setStatus(mode === 'register' ? 'Konto erstellt. Prüfe gegebenenfalls deine E-Mail.' : 'Erfolgreich eingeloggt.');
-    if (result.data.user) showLoggedIn(result.data.user);
+
+    if (!email || !password) {
+      setStatus('Bitte E-Mail-Adresse und Passwort eingeben.');
+      return;
+    }
+
+    if (password.length < 6) {
+      setStatus('Das Passwort muss mindestens 6 Zeichen lang sein.');
+      return;
+    }
+
+    setBusy(true);
+    setStatus(mode === 'register' ? 'Konto wird erstellt …' : 'Anmeldung wird geprüft …');
+
+    try {
+      let result;
+      if (mode === 'register') {
+        result = await supabase.auth.signUp({ email, password });
+      } else {
+        result = await supabase.auth.signInWithPassword({ email, password });
+      }
+
+      if (result.error) {
+        console.error('Supabase Auth Fehler:', result.error);
+        setStatus(authErrorMessage(result.error));
+        return;
+      }
+
+      if (mode === 'register') {
+        if (result.data.session) {
+          setStatus('Konto erstellt und erfolgreich eingeloggt.');
+          showLoggedIn(result.data.user);
+        } else {
+          setStatus('Konto erstellt. Bitte bestätige zuerst deine E-Mail-Adresse und logge dich danach ein.');
+        }
+      } else if (result.data.session && result.data.user) {
+        setStatus('Erfolgreich eingeloggt.');
+        showLoggedIn(result.data.user);
+      } else {
+        setStatus('Login abgeschlossen, aber keine Sitzung wurde erstellt. Bitte erneut versuchen.');
+      }
+    } catch (error) {
+      console.error('Unerwarteter Auth-Fehler:', error);
+      setStatus('Login momentan nicht möglich. Bitte erneut versuchen.');
+    } finally {
+      setBusy(false);
+    }
   });
 
   register?.addEventListener('click', () => {
-    form.dataset.mode = form.dataset.mode === 'register' ? 'login' : 'register';
-    register.textContent = form.dataset.mode === 'register' ? 'Zur Anmeldung' : 'Konto erstellen';
-    document.querySelector('[data-auth-submit]').textContent = form.dataset.mode === 'register' ? 'Registrieren' : 'Einloggen';
+    const nextMode = form.dataset.mode === 'register' ? 'login' : 'register';
+    form.dataset.mode = nextMode;
+    register.textContent = nextMode === 'register' ? 'Zur Anmeldung' : 'Konto erstellen';
+    if (submit) submit.textContent = nextMode === 'register' ? 'Registrieren' : 'Einloggen';
+    setStatus(nextMode === 'register' ? 'Neues Konto erstellen.' : 'Mit deinem BurnLab-Konto anmelden.');
   });
 
-  logout?.addEventListener('click', async () => { await supabase.auth.signOut(); location.reload(); });
+  logout?.addEventListener('click', async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error('Logout Fehler:', error);
+      setStatus(authErrorMessage(error));
+      return;
+    }
+    showLoggedOut();
+  });
 
-  async function showLoggedIn(user) {
-    form?.classList.add('hidden');
+  function showLoggedIn(user) {
+    form.classList.add('hidden');
     register?.classList.add('hidden');
     logout?.classList.remove('hidden');
-    if (status) status.textContent = `Eingeloggt als ${user.email}`;
-    await loadOrders(user.id);
+    setStatus(`Eingeloggt als ${user.email}`);
+    loadOrders(user.id);
+  }
+
+  function showLoggedOut() {
+    form.classList.remove('hidden');
+    register?.classList.remove('hidden');
+    logout?.classList.add('hidden');
+    setStatus('Bitte einloggen oder ein Konto erstellen.');
+    form.reset();
   }
 
   async function loadOrders(userId) {
     const list = document.querySelector('[data-orders]');
     if (!list) return;
     const { data, error } = await supabase.from('orders').select('id,status,total_cents,created_at').eq('user_id', userId).order('created_at', { ascending: false });
-    if (error) return;
-    list.innerHTML = data.length ? data.map(order => `<div class="card"><strong>Bestellung ${order.id.slice(0,8)}</strong><p>Status: ${escapeHtml(order.status)}</p><p>${(order.total_cents / 100).toFixed(2).replace('.', ',')} €</p></div>`).join('') : '<p>Noch keine Bestellungen.</p>';
+    if (error) {
+      console.error('Bestellungen konnten nicht geladen werden:', error);
+      list.innerHTML = '<p>Bestellungen konnten nicht geladen werden.</p>';
+      return;
+    }
+    list.innerHTML = data.length ? data.map(order => `<div class="card"><strong>Bestellung ${escapeHtml(order.id.slice(0, 8))}</strong><p>Status: ${escapeHtml(order.status)}</p><p>${(order.total_cents / 100).toFixed(2).replace('.', ',')} €</p></div>`).join('') : '<p>Noch keine Bestellungen.</p>';
   }
+}
 
-  function setStatus(message) { if (status) status.textContent = message; }
+function authErrorMessage(error) {
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('invalid login credentials')) return 'E-Mail oder Passwort ist falsch.';
+  if (message.includes('email not confirmed')) return 'Bitte bestätige zuerst deine E-Mail-Adresse.';
+  if (message.includes('user already registered')) return 'Diese E-Mail ist bereits registriert. Bitte einloggen.';
+  if (message.includes('password should be at least')) return 'Das Passwort muss mindestens 6 Zeichen lang sein.';
+  if (message.includes('rate limit')) return 'Zu viele Versuche. Bitte kurz warten und erneut versuchen.';
+  if (message.includes('network') || message.includes('fetch')) return 'Keine Verbindung zu Supabase. Bitte Internetverbindung prüfen.';
+  return error?.message || 'Authentifizierung fehlgeschlagen.';
+}
+
+function setGlobalError(message) {
+  const status = document.querySelector('[data-account-status]');
+  if (status) status.textContent = message;
 }
 
 function escapeHtml(value) {
